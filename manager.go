@@ -21,12 +21,13 @@ type Manager struct {
 	errorHandler   http.Handler
 }
 
-// NewManager returns a new Manager with the specified secret, trusted origins, and cookie options.
-func NewManager(secret []byte, trustedOrigins []string, cookieOpts CookieOptions) *Manager {
+// NewManager returns a new Manager with the specified secret, trusted origins, cookie options, and error handler.
+func NewManager(secret []byte, trustedOrigins []string, cookieOpts CookieOptions, errorHandler http.Handler) *Manager {
 	return &Manager{
 		secret:         secret,
 		trustedOrigins: trustedOrigins,
 		cookieOpts:     cookieOpts,
+		errorHandler:   errorHandler,
 	}
 }
 
@@ -48,14 +49,14 @@ func (m *Manager) Hash(message string) []byte {
 	return mac.Sum(nil)
 }
 
-// GenerateToken creates a new CSRF token based on the provided session identifier.
-func (m *Manager) GenerateToken(session string) (string, error) {
-	b, err := m.GenerateRandomBytes()
+// GenerateToken creates a new CSRF token.
+func (m *Manager) GenerateToken() (string, error) {
+	rb, err := m.GenerateRandomBytes()
 	if err != nil {
 		return "", err
 	}
 
-	message := session + ":" + hex.EncodeToString(b)
+	message := hex.EncodeToString(rb)
 	hash := m.Hash(message)
 	tok := hex.EncodeToString(hash) + ":" + message
 
@@ -65,16 +66,21 @@ func (m *Manager) GenerateToken(session string) (string, error) {
 // VerifyToken checks the validity of the given CSRF token.
 func (m *Manager) VerifyToken(tok string) error {
 	spTok := strings.Split(tok, ":")
-	if len(spTok) != 3 {
-		return ErrInvalidToken
+	if len(spTok) != 2 {
+		return ErrBadToken
 	}
 
-	message := spTok[1] + ":" + spTok[2]
+	// subtle.ConstantTimeCompare will return 0 immediately if the lengths do not match.
+	if len(spTok[0]) != 64 || len(spTok[1]) != 64 {
+		return ErrBadToken
+	}
+
+	message := spTok[1]
 	hash := m.Hash(message)
 	tok2 := hex.EncodeToString(hash) + ":" + message
 
 	if subtle.ConstantTimeCompare([]byte(tok), []byte(tok2)) == 0 {
-		return ErrInvalidToken
+		return ErrTokenMismatch
 	}
 
 	return nil
@@ -87,7 +93,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		cookie, err := r.Cookie(m.cookieOpts.Name)
 		if errors.Is(err, http.ErrNoCookie) {
 			// The request do not have CSRF cookie yet, so let's generate one.
-			tok, err := m.GenerateToken("")
+			tok, err := m.GenerateToken()
 			if err != nil {
 				r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, err))
 				m.errorHandler.ServeHTTP(w, r)
@@ -108,21 +114,27 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			if r.URL.Scheme == "https" {
 				refererURL, err := url.Parse(r.Referer())
 				if err != nil || refererURL.String() == "" {
-					r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrInvalidOrigin))
+					r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrBadOrigin))
 					m.errorHandler.ServeHTTP(w, r)
 					return
 				}
 
 				valid := r.URL.Scheme == refererURL.Scheme && r.URL.Host == refererURL.Host
 				if !valid && !slices.Contains(m.trustedOrigins, refererURL.Host) {
-					r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrInvalidOrigin))
+					r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrUntrustedOrigin))
 					m.errorHandler.ServeHTTP(w, r)
 					return
 				}
 			}
 
+			if r.Header.Get("X-CSRF-TOKEN") != cookie.Value {
+				r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrTokenMismatch))
+				m.errorHandler.ServeHTTP(w, r)
+				return
+			}
+
 			if err := m.VerifyToken(cookie.Value); err != nil {
-				r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrInvalidToken))
+				r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, err))
 				m.errorHandler.ServeHTTP(w, r)
 				return
 			}
