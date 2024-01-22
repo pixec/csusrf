@@ -99,7 +99,7 @@ func (m *Manager) Hash(message string) []byte {
 // The final CSRF token is a combination of the base64-encoded
 // hash and the original message, separated by a colon (:).
 //
-// sessionID should be empty if user is not unauthenticated.
+// sessionID should be empty if user is not authenticated.
 func (m *Manager) GenerateToken(sessionID string) (string, error) {
 	rb, err := m.GenerateRandomBytes()
 	if err != nil {
