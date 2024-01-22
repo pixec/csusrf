@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/url"
@@ -16,19 +16,61 @@ import (
 
 type Manager struct {
 	secret         []byte
+	headerName     string
 	trustedOrigins []string
 	cookieOpts     CookieOptions
 	errorHandler   http.Handler
 }
 
-// NewManager returns a new Manager with the specified secret, trusted origins, cookie options, and error handler.
-func NewManager(secret []byte, trustedOrigins []string, cookieOpts CookieOptions, errorHandler http.Handler) *Manager {
-	return &Manager{
-		secret:         secret,
-		trustedOrigins: trustedOrigins,
-		cookieOpts:     cookieOpts,
-		errorHandler:   errorHandler,
+type ManagerOption func(m *Manager)
+
+func WithHeaderName(headerName string) ManagerOption {
+	return func(m *Manager) {
+		m.headerName = headerName
 	}
+}
+
+func WithTrustedOrigins(trustedOrigins []string) ManagerOption {
+	return func(m *Manager) {
+		m.trustedOrigins = trustedOrigins
+	}
+}
+
+func WithCookieOpts(cookieOpts CookieOptions) ManagerOption {
+	return func(m *Manager) {
+		m.cookieOpts = cookieOpts
+	}
+}
+
+func WithErrorHandler(errorHandler http.Handler) ManagerOption {
+	return func(m *Manager) {
+		m.errorHandler = errorHandler
+	}
+}
+
+// NewManager returns a new Manager with the specified options.
+func NewManager(secret []byte, opts ...ManagerOption) *Manager {
+	m := &Manager{
+		secret: secret,
+	}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+
+	if m.headerName == "" {
+		m.headerName = "X-CSRF-TOKEN"
+	}
+
+	if m.errorHandler == nil {
+		m.errorHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			csusrfErr, _ := FromContext[error](r.Context(), ErrCtxKey)
+
+			http.Error(w, csusrfErr.Error(), http.StatusForbidden)
+		})
+	}
+
+	return m
 }
 
 // GenerateRandomBytes generates cryptographically secure random bytes.
@@ -49,16 +91,24 @@ func (m *Manager) Hash(message string) []byte {
 	return mac.Sum(nil)
 }
 
-// GenerateToken creates a new CSRF token.
-func (m *Manager) GenerateToken() (string, error) {
+// GenerateToken creates a new CSRF token for the given session.
+//
+// It generates a random byte slice, encodes it using base64,
+// and combines it with the provided sessionID. The resulting
+// message is then hashed using HMAC SHA-256.
+// The final CSRF token is a combination of the base64-encoded
+// hash and the original message, separated by a colon (:).
+//
+// sessionID should be empty if user is not unauthenticated.
+func (m *Manager) GenerateToken(sessionID string) (string, error) {
 	rb, err := m.GenerateRandomBytes()
 	if err != nil {
 		return "", err
 	}
 
-	message := hex.EncodeToString(rb)
+	message := sessionID + "-" + base64.StdEncoding.EncodeToString(rb)
 	hash := m.Hash(message)
-	tok := hex.EncodeToString(hash) + ":" + message
+	tok := base64.StdEncoding.EncodeToString(hash) + ":" + message
 
 	return tok, nil
 }
@@ -70,16 +120,12 @@ func (m *Manager) VerifyToken(tok string) error {
 		return ErrBadToken
 	}
 
-	// subtle.ConstantTimeCompare will return 0 immediately if the lengths do not match.
-	if len(spTok[0]) != 64 || len(spTok[1]) != 64 {
-		return ErrBadToken
-	}
-
+	hash := spTok[0]
 	message := spTok[1]
-	hash := m.Hash(message)
-	tok2 := hex.EncodeToString(hash) + ":" + message
+	hash2 := base64.StdEncoding.EncodeToString(m.Hash(message))
 
-	if subtle.ConstantTimeCompare([]byte(tok), []byte(tok2)) == 0 {
+	// Use constant time comparison to avoid timings attack.
+	if subtle.ConstantTimeCompare([]byte(hash), []byte(hash2)) == 0 {
 		return ErrTokenMismatch
 	}
 
@@ -93,7 +139,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		cookie, err := r.Cookie(m.cookieOpts.Name)
 		if errors.Is(err, http.ErrNoCookie) {
 			// The request do not have CSRF cookie yet, so let's generate one.
-			tok, err := m.GenerateToken()
+			tok, err := m.GenerateToken("")
 			if err != nil {
 				r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, err))
 				m.errorHandler.ServeHTTP(w, r)
@@ -127,7 +173,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 				}
 			}
 
-			if r.Header.Get("X-CSRF-TOKEN") != cookie.Value {
+			if r.Header.Get(m.headerName) != cookie.Value {
 				r = r.WithContext(context.WithValue(r.Context(), ErrCtxKey, ErrTokenMismatch))
 				m.errorHandler.ServeHTTP(w, r)
 				return

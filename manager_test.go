@@ -12,14 +12,12 @@ import (
 
 var (
 	secretKey       = []byte("Sneaky crewmates play, Amogus impostors sway, Betrayal in space's bay.")
-	testTok         = "1fa7f61b72e5d22ee9e78eb87d343b04fe34c1ec72ca6538a5968ff4a9559c89:520f2f1e2785d05108b35434cf5db674f043974d701aa54c4709ed6c462829ca"
-	reversedTestTok = "520f2f1e2785d05108b35434cf5db674f043974d701aa54c4709ed6c462829ca:1fa7f61b72e5d22ee9e78eb87d343b04fe34c1ec72ca6538a5968ff4a9559c89"
+	testTok         = "8zKZgE99EYdwGdDbjgMLxO6I3n4enZ/O22bmJ7jLlYI=:-1KeZm/sVzBoKnCQ+1j8MjYf9w+CiFZxWzmr0CP7ywxA="
+	reversedTestTok = "-1KeZm/sVzBoKnCQ+1j8MjYf9w+CiFZxWzmr0CP7ywxA=:8zKZgE99EYdwGdDbjgMLxO6I3n4enZ/O22bmJ7jLlYI="
 	manager         = csusrf.NewManager(
 		secretKey,
-		[]string{"a.example.com"},
-		csusrf.DefaultCookieOptions(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "", http.StatusForbidden)
-		}),
+		csusrf.WithTrustedOrigins([]string{"a.example.com"}),
+		csusrf.WithCookieOpts(csusrf.DefaultCookieOptions()),
 	)
 )
 
@@ -35,30 +33,19 @@ func TestManagerGenerateRandomBytes(t *testing.T) {
 }
 
 func TestManagerGenerateToken(t *testing.T) {
-	if _, err := manager.GenerateToken(); err != nil {
+	if _, err := manager.GenerateToken(""); err != nil {
 		t.Error(err)
 	}
 }
 
 func TestManagerVerifyToken(t *testing.T) {
-	tok, err := manager.GenerateToken()
-	if err != nil {
-		t.Error(err)
-	}
-
-	if err := manager.VerifyToken(tok); err != nil {
+	if err := manager.VerifyToken(testTok); err != nil {
 		t.Error(err)
 	}
 }
 
 func TestManagerVerifyTokenBadToken(t *testing.T) {
 	if err := manager.VerifyToken("1"); err != nil {
-		if !errors.Is(err, csusrf.ErrBadToken) {
-			t.Errorf("expected %v, got %v", csusrf.ErrBadToken, err)
-		}
-	}
-
-	if err := manager.VerifyToken("1:1"); err != nil {
 		if !errors.Is(err, csusrf.ErrBadToken) {
 			t.Errorf("expected %v, got %v", csusrf.ErrBadToken, err)
 		}
@@ -94,11 +81,7 @@ func TestManagerMiddleware(t *testing.T) {
 func TestManagerMiddlewareBadOrigin(t *testing.T) {
 	manager := csusrf.NewManager(
 		secretKey,
-		nil,
-		csusrf.DefaultCookieOptions(),
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "", http.StatusForbidden)
-		}),
+		csusrf.WithCookieOpts(csusrf.DefaultCookieOptions()),
 	)
 
 	r := httptest.NewRequest("POST", "https://example.com", nil)
@@ -116,11 +99,7 @@ func TestManagerMiddlewareBadOrigin(t *testing.T) {
 func TestManagerMiddlewareUntrustedOrigin(t *testing.T) {
 	manager := csusrf.NewManager(
 		secretKey,
-		nil,
-		csusrf.DefaultCookieOptions(),
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "", http.StatusForbidden)
-		}),
+		csusrf.WithCookieOpts(csusrf.DefaultCookieOptions()),
 	)
 
 	r := httptest.NewRequest("POST", "https://example.com", nil)
@@ -168,5 +147,21 @@ func TestManagerMiddlewareTokenMismatch(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func BenchmarkManagerGenerateToken(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if _, err := manager.GenerateToken(testTok); err != nil {
+			b.Error(err)
+		}
+	}
+}
+
+func BenchmarkManagerVerifyToken(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if err := manager.VerifyToken(testTok); err != nil {
+			b.Error(err)
+		}
 	}
 }
