@@ -151,17 +151,21 @@ func TestManagerMiddlewareTokenMismatch(t *testing.T) {
 }
 
 func BenchmarkManagerGenerateToken(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		if _, err := manager.GenerateToken(testTok); err != nil {
-			b.Error(err)
+	b.RunParallel(func(p *testing.PB) {
+		for p.Next() {
+			if _, err := manager.GenerateToken(""); err != nil {
+				b.Error(err)
+			}
 		}
-	}
+	})
 }
 
 func BenchmarkManagerVerifyToken(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		if err := manager.VerifyToken(testTok); err != nil {
-			b.Error(err)
+	b.RunParallel(func(p *testing.PB) {
+		for p.Next() {
+			if err := manager.VerifyToken(testTok); err != nil {
+				b.Error(err)
+			}
 		}
-	}
+	})
 }
